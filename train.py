@@ -51,9 +51,6 @@ def parse_args():
         help="Pixel-wise loss weights",
     )
     parser.add_argument(
-        "--g_every", type=int, default=1, help="Training generator every k iteration"
-    )
-    parser.add_argument(
         "--g_lr", type=float, default=1e-4, help="learning rate for generator"
     )
     parser.add_argument(
@@ -74,6 +71,14 @@ def parse_args():
     )
     args = parser.parse_args()
     return args
+
+
+def get_gradient_ratios(lossA, lossB, x_f, eps=1e-6):
+    grad_lossA_xf = torch.autograd.grad(torch.sum(lossA), x_f, retain_graph=True)[0]
+    grad_lossB_xf = torch.autograd.grad(torch.sum(lossB), x_f, retain_graph=True)[0]
+    gamma = grad_lossA_xf / grad_lossB_xf
+
+    return gamma
 
 
 # define data generator
@@ -164,18 +169,29 @@ for epoch in range(args.epoch):
         # Loss measures generator's ability to fool the discriminator
         g_loss_gan = adversarial_loss(D(gen_imgs), valid)
         g_loss = g_loss_gan + args.pixel_loss_weights * torch.mean((uvvar - uvgen) ** 2)
-        if i % args.g_every == 0:
-            g_loss.backward()
-            optimizer_G.step()
-
-        optimizer_D.zero_grad()
 
         # Measure discriminator's ability to classify real from generated samples
         real_loss = adversarial_loss(D(real_imgs), valid)
         fake_loss = adversarial_loss(D(gen_imgs.detach()), fake)
         d_loss = (real_loss + fake_loss) / 2
-        d_loss.backward()
+
+        # combine loss
+        gamma = get_gradient_ratios(g_loss, fake_loss, gen_imgs)
+        grad_d_factor = 1.0 / (1.0 - gamma)
+
+        loss_pack_fake = fake_loss - g_loss
+        scaled_loss_pack_fake = loss_pack_fake * grad_d_factor
+        loss_pack = real_loss + torch.mean(scaled_loss_pack_fake)
+
+        # backward
+        optimizer_D.zero_grad()
+        optimizer_G.zero_grad()
+
+        loss_pack.backward()
+
         optimizer_D.step()
+        optimizer_G.step()
+
         i += 1
         if i % args.checkpoint_every == 0:
             print(
